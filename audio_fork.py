@@ -48,10 +48,11 @@ class AudioForkSession:
             EVENT_CONNECT, EVENT_CONNECT_FAILED, EVENT_DISCONNECT,
             EVENT_ERROR, EVENT_MAINTENANCE
         ]
-        self.con.events("plain", "CUSTOM", " ".join(custom_events))
+        self.con.events("plain", f"CUSTOM {' '.join(custom_events)}")
         
         # 订阅通道事件
-        self.con.events("plain", "DTMF CHANNEL_ANSWER")
+        self.con.events("plain", "DTMF") 
+        self.con.events("plain", "CHANNEL_ANSWER")
         
     def on_connect(self, event):
         """连接成功事件处理"""
