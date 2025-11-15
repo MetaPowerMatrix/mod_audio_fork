@@ -104,8 +104,8 @@ class AudioForkSession:
         self.con.execute("playback", "silence_stream://1000", self.uuid)
         
         # 使用Google TTS播放欢迎消息
-        tts_text = "Hi there. Please go ahead and make a recording and then hangup"
-        self.con.execute("speak", f"google_tts:en-GB-Wavenet-A:{tts_text}", self.uuid)
+        # tts_text = "Hi there. Please go ahead and make a recording and then hangup"
+        # self.con.execute("speak", f"google_tts:en-GB-Wavenet-A:{tts_text}", self.uuid)
         
         # 启动音频流转发
         metadata_str = json.dumps(metadata)
