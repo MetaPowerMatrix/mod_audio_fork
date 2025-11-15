@@ -46,7 +46,7 @@ class AudioForkSession:
         # 订阅自定义事件
         custom_events = [
             EVENT_CONNECT, EVENT_CONNECT_FAILED, EVENT_DISCONNECT,
-            EVENT_ERROR, EVENT_MAINTENANCE
+            EVENT_ERROR, EVENT_MAINTENANCE, EVENT_PLAY_AUDIO, EVENT_KILL_AUDIO
         ]
         self.con.events("plain", f"CUSTOM {' '.join(custom_events)}")
         
@@ -73,6 +73,60 @@ class AudioForkSession:
     def on_maintenance(self, event):
         """维护事件处理"""
         print(f"got event: {event.getBody()}")
+        
+    def handle_play_audio(self, event):
+        """处理播放音频事件"""
+        try:
+            event_body = event.getBody()
+            if not event_body:
+                print("No event body in play_audio event")
+                return
+                
+            data = json.loads(event_body)
+            audio_content_type = data.get('audioContentType')
+            sample_rate = data.get('sampleRate')
+            text_content = data.get('textContent')
+            audio_file = data.get('file')
+            
+            print(f"Received play_audio event:")
+            print(f"  Audio content type: {audio_content_type}")
+            print(f"  Sample rate: {sample_rate}")
+            print(f"  Text content: {text_content}")
+            print(f"  Audio file: {audio_file}")
+            
+            if audio_file and self.uuid:
+                # 播放音频文件给caller
+                if audio_content_type == 'raw':
+                    # 对于raw音频文件，使用playback命令播放
+                    print(f"Playing raw audio file: {audio_file}")
+                    result = self.con.execute("playback", audio_file, self.uuid)
+                    if result:
+                        print(f"Playback result: {result.getBody()}")
+                elif audio_content_type == 'wave' or audio_content_type == 'wav':
+                    # 对于wav文件，直接播放
+                    print(f"Playing wav audio file: {audio_file}")
+                    result = self.con.execute("playback", audio_file, self.uuid)
+                    if result:
+                        print(f"Playback result: {result.getBody()}")
+                else:
+                    print(f"Unsupported audio content type: {audio_content_type}")
+                                            
+            else:
+                print("Missing audio file path or UUID")
+                
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse play_audio event JSON: {e}")
+        except Exception as e:
+            print(f"Error handling play_audio event: {e}")
+            
+    def handle_kill_audio(self, event):
+        """处理停止播放音频事件"""
+        print("Received kill_audio event - stopping current playback")
+        if self.uuid:
+            # 停止当前播放
+            result = self.con.execute("stop", "", self.uuid)
+            if result:
+                print(f"Stop playback result: {result.getBody()}")
         
     def handle_dtmf(self, event):
         """处理DTMF事件"""
@@ -134,6 +188,10 @@ class AudioForkSession:
                 self.on_error(event)
             elif event_subclass == EVENT_MAINTENANCE:
                 self.on_maintenance(event)
+            elif event_subclass == EVENT_PLAY_AUDIO:
+                self.handle_play_audio(event)
+            elif event_subclass == EVENT_KILL_AUDIO:
+                self.handle_kill_audio(event)
         elif event_name == "DTMF":
             self.handle_dtmf(event)
         elif event_name == "CHANNEL_ANSWER":
