@@ -163,7 +163,7 @@ class AudioForkSession:
         
         # 启动音频流转发
         metadata_str = json.dumps(metadata)
-        cmd = f"uuid_audio_fork {self.uuid} start {self.ws_url} mono 16000 {metadata_str}"
+        cmd = f"uuid_audio_fork {self.uuid} start {self.ws_url} mono 16000"
         
         result = self.con.api(cmd)
         if not result or result.getBody().strip() != "+OK Success":
