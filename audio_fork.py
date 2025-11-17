@@ -98,20 +98,10 @@ class AudioForkSession:
                 # 播放音频文件给caller
                 if audio_content_type == 'raw':
                     # 对于raw音频文件，使用playback命令播放，指定采样率
-                    print(f"Playing raw audio file: {audio_file}")
                     try:
-                        if sample_rate:
-                            # 先设置采样率变量，再播放
-                            print(f"Setting sample rate to {sample_rate} Hz")
-                            set_result = self.con.execute("set", f"playback_sample_rate={sample_rate}")
-                            if set_result:
-                                print(f"Set command result: {set_result.getBody()}")
-                            else:
-                                print("Set command returned None")
-                        
                         # 执行播放命令
-                        print(f"Executing playback command for file: {audio_file}")
-                        result = self.con.execute("playback", audio_file, self.uuid)
+                        print(f"Executing playback command for file: {audio_file}@{self.uuid}")
+                        result = self.con.execute("playback", audio_file)
                         
                         if result.getBody() != None:
                             print(f"Playback result: {result.getBody()}")
