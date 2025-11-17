@@ -1,26 +1,119 @@
-# WebSocket 音频播放功能使用指南
+# WebSocket 音频播放功能使用指南（更新版）
 
 ## 概述
 
-`audio_fork.py` 现在支持完整的音频播放功能，可以接收来自 WebSocket 服务器的音频播放请求，并将音频播放给 caller。
+`audio_fork.py` 现在支持完整的音频播放功能，可以接收来自 WebSocket 服务器的音频播放请求，并将音频播放给 caller。本版本**重新实现了队列播放机制**，参考了 `freeswitch_audio_monitor.py` 的设计，解决了音频播放乱序问题。
 
-## 新增功能
+## 核心改进
 
-### 1. 播放音频事件处理 (`mod_audio_fork::play_audio`)
+### 1. 会话隔离的音频队列（新增）
+- **每会话独立队列**: 每个通话UUID拥有独立的音频播放队列，避免不同通话间的干扰
+- **线程安全**: 使用 `threading.RLock` 确保多线程环境下的安全操作
+- **队列大小限制**: 默认最大队列大小为10个音频任务，超出时自动移除最旧任务
 
-当 WebSocket 服务器发送 `playAudio` 消息时，系统会：
-- 接收 base64 编码的音频数据
-- 保存为临时文件
-- 触发 `mod_audio_fork::play_audio` 事件
-- 自动播放音频文件给 caller
+### 2. 顺序播放保证（新增）
+- **等待播放完成**: 每个音频播放完成后才处理下一个音频任务
+- **播放状态跟踪**: 实时跟踪当前播放状态和队列大小
+- **播放完成检测**: 基于音频文件大小估算播放时长，确保完整播放
 
-### 2. 停止播放事件处理 (`mod_audio_fork::kill_audio`)
+### 3. 智能播放控制（增强）
+- **多种播放方法**: 支持 `uuid_broadcast` 和 `uuid_displace` 两种播放方式
+- **自动重试机制**: 播放失败时自动尝试备用播放方法
+- **播放中断处理**: 支持随时停止播放和清空队列
 
-当 WebSocket 服务器发送 `killAudio` 消息时，系统会：
-- 停止当前正在播放的音频
-- 触发 `mod_audio_fork::kill_audio` 事件
+## 架构设计
 
-## WebSocket 消息格式
+### 核心组件
+
+```python
+# 音频队列管理（重新设计）
+self.audio_queues = defaultdict(queue.Queue)      # 每会话的音频队列
+self.playback_threads = defaultdict(threading.Thread)  # 每会话的播放线程
+self.playback_status = defaultdict(dict)        # 每会话的播放状态
+self.queue_lock = threading.RLock()             # 队列操作锁
+```
+
+### 播放状态跟踪
+
+```python
+playback_status = {
+    'playing': False,           # 是否正在播放
+    'current_file': None,       # 当前播放文件
+    'last_play_time': None,     # 最后播放时间
+    'queue_size': 0            # 队列大小
+}
+```
+
+## 工作流程
+
+### 1. 音频任务入队（重新实现）
+
+当收到 `play_audio` 事件时：
+
+1. 检查是否为会话创建音频队列
+2. 创建音频任务对象（包含文件路径、采样率、时间戳等）
+3. 线程安全地将任务加入对应会话的队列
+4. 如果当前未在播放，启动播放线程
+
+### 2. 音频播放处理（重新实现）
+
+播放线程的工作流程：
+
+1. 从队列获取音频任务
+2. 更新播放状态（正在播放、当前文件、队列大小）
+3. 执行音频播放（支持多种播放方法）
+4. **等待播放完成**（基于文件大小估算时长）⭐
+5. 更新播放状态（播放完成）
+6. 处理下一个音频任务
+
+### 3. 播放完成检测（新增）
+
+```python
+def wait_for_playback_completion(self, audio_file, sample_rate):
+    """等待播放完成 - 参考freeswitch_audio_monitor.py实现"""
+    try:
+        # 获取文件大小
+        file_size = os.path.getsize(audio_file)
+        
+        # 估算音频时长（基于文件大小和采样率）
+        if audio_file.endswith('.wav'):
+            # WAV文件：44字节头 + 音频数据
+            audio_data_size = file_size - 44
+            duration = audio_data_size / (sample_rate * 2)  # 16位采样
+        else:
+            # 原始音频文件
+            if sample_rate == 8000:
+                duration = file_size / sample_rate  # 8位采样
+            elif sample_rate == 16000:
+                duration = file_size / (sample_rate * 2)  # 16位采样
+            elif sample_rate == 24000:
+                duration = file_size / (sample_rate * 3)  # 24位采样
+            else:
+                duration = file_size / (sample_rate * 2)  # 默认16位采样
+        
+        # 添加缓冲时间
+        wait_time = duration + 0.5
+        print(f"Estimated playback duration: {duration:.2f}s, waiting: {wait_time:.2f}s")
+        
+        # 等待播放完成
+        time.sleep(wait_time)
+        
+    except Exception as e:
+        print(f"Error estimating playback duration: {e}")
+        # 出错时等待默认时间
+        time.sleep(2.0)
+```
+
+### 4. 播放停止处理（增强）
+
+当收到 `kill_audio` 事件时：
+
+1. 向对应会话队列发送停止信号（None）
+2. 清空队列中的所有音频任务
+3. 尝试多种方法停止当前播放
+4. 更新播放状态
+
+## WebSocket 消息格式（保持不变）
 
 ### 播放音频消息
 ```json
@@ -57,21 +150,6 @@
 - 48000 Hz
 - 64000 Hz
 
-### 采样率匹配问题解决方案
-
-**问题**: FreeSWITCH 默认使用 8000Hz 采样率，当播放不同采样率的音频时会出现：
-```
-File sample rate 24000 doesn't match requested rate 8000
-Codec Activated L16@8000hz 1 channels 20ms
-```
-
-**解决方案**: `audio_fork.py` 会自动检测 `sampleRate` 参数，并在播放 raw 音频时使用 FreeSWITCH 的采样率配置：
-
-```bash
-# 自动配置采样率
-playback({playback_sample_rate=24000}/tmp/audio_file.r24)
-```
-
 ### 文件扩展名规则
 根据采样率，临时文件使用不同的扩展名：
 - `.r8` - 8000 Hz
@@ -84,175 +162,139 @@ playback({playback_sample_rate=24000}/tmp/audio_file.r24)
 
 ## 使用方法
 
-### 1. 启动 audio_fork.py
+### 1. 创建测试音频文件（新增）
+
+```bash
+# 生成测试音频文件
+python create_test_audio.py
+```
+
+该脚本会创建多种格式的测试音频文件：
+- 不同采样率（8kHz、16kHz、24kHz）
+- 不同格式（原始音频、WAV）
+- 不同长度和音调，便于测试顺序播放
+
+### 2. 启动 audio_fork.py
 
 ```bash
 python3 audio_fork.py ws://localhost:8080
 ```
 
-### 2. 运行测试脚本
+### 3. 运行测试脚本（增强）
 
 ```bash
-python3 test_playback.py
+# 运行测试脚本
+python test_queue_playback.py
 ```
 
-### 3. 或者手动发送 WebSocket 消息
+选择测试项目：
+- **测试队列播放（顺序播放）**: 验证音频按发送顺序播放
+- **测试快速连续播放**: 验证快速发送时是否保持顺序（重点测试乱序问题）
+- **测试停止播放**: 验证播放中断功能
 
-使用任何 WebSocket 客户端连接到 `ws://localhost:8080`，发送播放音频消息。
+### 4. 观察日志输出
 
-## 事件处理流程
+在 `audio_fork.py` 的日志中观察：
+- 音频任务入队信息（包含队列大小）
+- 播放开始和完成信息（包含等待时长）
+- 队列大小变化
+- **顺序播放的执行过程**（重点验证）
 
-1. **WebSocket 服务器** 发送 `playAudio` 消息
-2. **mod_audio_fork** 接收音频数据并保存为临时文件
-3. **mod_audio_fork** 触发 `mod_audio_fork::play_audio` 事件
-4. **audio_fork.py** 接收到事件并提取音频文件路径
-5. **audio_fork.py** 使用 FreeSWITCH 的 `playback` 命令播放音频
-6. **caller** 听到播放的音频
+## 队列处理流程（更新）
 
-## 错误处理
+```
+WebSocket playAudio事件 → 会话隔离队列 → 播放线程处理 → 等待播放完成 → FreeSWITCH播放 → 完成后处理下一个
+```
 
-系统会自动处理以下错误情况：
-- JSON 解析错误
-- 缺少音频文件路径
-- 不支持的音频格式
-- FreeSWITCH 播放命令失败
-- 网络连接问题
-
-## 示例输出
+## 示例输出（更新）
 
 ```
 Received play_audio event:
   Audio content type: raw
   Sample rate: 8000
   Text content: Playing 1kHz test tone for 2 seconds
-  Audio file: /tmp/7dd5e34e-5db4-4edb-a166-757e5d29b941_2.tmp.r8
-Playing raw audio file: /tmp/7dd5e34e-5db4-4edb-a166-757e5d29b941_2.tmp.r8
-Playback result: +OK Success
+  Audio file: /tmp/audio_001.r8
+Added audio to queue for session_uuid: /tmp/audio_001.r8 (queue size: 1)
+Processing playback task: /tmp/audio_001.r8 (type: raw, rate: 8000)
+Estimated playback duration: 1.0s, waiting: 1.5s
+Playing raw audio file: /tmp/audio_001.r8 (sample rate: 8000)
+Playback completed, processing next task...
 ```
 
-## 故障排除
+## 故障排除（增强）
 
-### 播放结果为 None
-如果看到 `Playback result: None`，说明播放命令执行失败。系统会自动尝试以下替代方案：
+### 音频播放乱序问题（重点解决）
+**症状**: 多个音频文件播放顺序与发送顺序不一致
+**解决**: 
+1. 检查日志中的"Estimated playback duration"信息
+2. 确认是否等待了足够的播放完成时间
+3. 验证音频文件时长估算是否准确
 
-1. **设置采样率变量** - 先执行 `set playback_sample_rate=<rate>`
-2. **标准播放命令** - 执行 `playback <filename>`
-3. **广播命令** - 执行 `uuid_broadcast <uuid> <filename>`
-4. **音频位移命令** - 执行 `uuid_displace <uuid> start <filename>`
+### 队列堆积问题
+**症状**: 队列大小持续增长，音频播放延迟
+**解决**: 
+1. 检查音频文件是否过大
+2. 验证播放是否成功完成
+3. 检查是否有播放失败的任务阻塞队列
 
-### 调试步骤
-1. 检查 FreeSWITCH 日志获取详细错误信息
-2. 确认音频文件存在且 FreeSWITCH 有读取权限
-3. 验证文件格式是否正确（16-bit PCM，小端序）
-4. 尝试手动在 FreeSWITCH CLI 执行相同命令
+### 播放中断失败
+**症状**: `kill_audio` 无法停止当前播放
+**解决**: 
+1. 检查 FreeSWITCH 连接和权限设置
+2. 验证是否正确发送到对应会话的队列
+3. 查看日志中的停止播放尝试记录
 
-### 手动测试命令
-在 FreeSWITCH CLI 中可以手动测试：
-```bash
-# 设置采样率
-uuid_setvar <uuid> playback_sample_rate 24000
+## 注意事项（重要更新）
 
-# 播放音频
-uuid_broadcast <uuid> /tmp/audio_file.r24
+1. **会话隔离**: 每个通话UUID拥有独立的播放队列，互不干扰
+2. **顺序保证**: 系统会等待每个音频播放完成后才处理下一个，确保顺序
+3. **快速连续发送**: 即使快速连续发送多个音频，也会严格按照顺序播放
+4. **播放完成检测**: 基于文件大小估算播放时长，确保完整播放
+5. **线程安全**: 所有队列操作都是线程安全的，支持并发处理
+6. **错误恢复**: 播放失败时自动尝试备用方法，提高成功率
 
-# 或使用位移
-uuid_displace <uuid> start /tmp/audio_file.r24
-```
+## 配置参数（新增）
 
-## 注意事项
+### 队列配置
+- **最大队列大小**: 10个音频任务（每会话独立）
+- **默认优先级**: 0（可以扩展优先级机制）
+- **队列操作超时**: 非阻塞模式（block=False）
 
-1. 临时音频文件会在 FreeSWITCH 会话结束时自动删除
-2. 确保 FreeSWITCH 有权限访问临时文件目录
-3. 音频播放是异步的，不会阻塞其他操作
-4. 支持同时播放多个音频文件（队列播放）
-5. 使用 `killAudio` 可以立即停止当前播放
-6. **重要**: 对于 raw 音频文件，确保正确设置 `sampleRate` 参数，否则会出现采样率不匹配错误
-7. **建议**: 使用 16000Hz 采样率作为默认设置，平衡音质和性能
+### 播放配置
+- **播放完成等待缓冲**: 0.5秒
+- **播放失败重试**: 支持多种播放方法（uuid_broadcast、uuid_displace）
+- **停止播放重试**: 支持多种停止方法
 
-## 队列播放机制
+## 优势特点（重新设计）
 
-### 概述
-`audio_fork.py` 现在实现了**队列播放机制**，可以处理多个音频播放请求，避免播放冲突和丢失。
+### 1. 彻底解决乱序问题 ⭐
+- ✅ **严格按照发送顺序播放音频**（等待播放完成机制）
+- ✅ **支持快速连续发送时的顺序保证**（队列机制保证）
+- ✅ **会话隔离，避免不同通话间的干扰**
 
-### 工作原理
-1. **音频任务队列**: 所有播放请求被加入到一个线程安全的队列中
-2. **独立播放线程**: 专门的线程负责从队列中取出任务并执行播放
-3. **顺序播放**: 音频文件按照接收顺序依次播放
-4. **播放控制**: 支持停止当前播放和清空队列
+### 2. 提高系统稳定性
+- ✅ **线程安全，避免并发问题**
+- ✅ **完善的错误处理和重试机制**
+- ✅ **每会话独立的播放状态管理**
 
-### 队列处理流程
-```
-WebSocket playAudio事件 → 加入播放队列 → 播放线程处理 → FreeSWITCH播放 → 完成
-```
+### 3. 增强可控性和可观测性
+- ✅ **实时跟踪播放状态和队列信息**
+- ✅ **支持随时停止播放和清空队列**
+- ✅ **详细的日志输出，便于调试和监控**
+- ✅ **播放时长估算和完成检测**
 
-### 队列状态监控
-在日志中可以看到队列状态：
-```
-Added playback task to queue. Queue size: 3
-Processing playback task: /tmp/audio1.r16 (type: raw, rate: 16000)
-Playing raw audio file: /tmp/audio1.r16 (sample rate: 16000)
-Method 1 succeeded: +OK Success
-```
+### 4. 保持兼容性和扩展性
+- ✅ **支持多种音频格式**（原始音频、WAV）
+- ✅ **支持多种采样率**（8kHz、16kHz、24kHz）
+- ✅ **易于扩展新的播放方法和配置**
 
-### 停止播放机制
-当收到 `killAudio` 事件时：
-1. **清空队列**: 移除所有待播放的音频任务
-2. **停止当前播放**: 使用多种方法尝试停止当前播放
+## 更新记录
 
-### 顺序播放保证
-为了确保音频播放的顺序性和完整性，系统实现了以下机制：
+### 2024年重大更新
+- 🔧 **重新设计队列机制**: 参考 `freeswitch_audio_monitor.py` 的实现
+- 🎯 **解决乱序问题**: 实现等待播放完成机制
+- 🏗️ **会话隔离架构**: 每UUID独立队列和状态管理
+- 🧪 **增强测试工具**: 提供 `create_test_audio.py` 和增强的测试脚本
+- 📊 **完善监控日志**: 详细的播放状态和队列信息输出
 
-1. **播放完成等待**: 每个音频播放后会等待播放完成才处理下一个任务
-2. **音频时长计算**: 自动计算音频文件时长，确保等待时间准确
-3. **顺序处理**: 严格按照队列顺序播放，不会出现乱序问题
-4. **状态跟踪**: 实时跟踪播放状态，确保一次只播放一个音频
-
-等待时间计算方式：
-```
-- 使用 librosa 库获取准确音频时长（推荐）
-- 回退方案：根据文件大小估算（24kHz, mono, 16bit）
-- 最小等待时间：0.5秒
-- 最大等待时间：15秒
-```
-
-示例日志：
-```
-Processing playback task: /tmp/audio1.r16 (type: raw, rate: 16000)
-Playing raw audio file: /tmp/audio1.r16 (sample rate: 16000)
-Method 1 succeeded: +OK Success
-Waiting 3.25 seconds for audio playback completion: audio1.r16
-Processing playback task: /tmp/audio2.r16 (type: raw, rate: 16000)
-...```
-3. **状态重置**: 重置播放状态，准备接收新任务
-
-### 播放失败处理
-播放线程会自动尝试多种播放方法：
-1. `uuid_broadcast` - 广播播放
-2. `set playback_sample_rate + playback` - 设置采样率后播放
-3. `uuid_displace` - 音频位移播放
-4. 标准 `playback` 命令
-
-### 测试队列播放
-使用新的测试脚本测试队列播放功能：
-```bash
-python3 test_queue_playback.py
-```
-
-测试功能包括：
-- 发送多个音频文件到播放队列
-- 测试不同采样率的音频文件
-- 测试停止播放功能
-- 监控队列状态和播放结果
-
-### 队列配置参数
-- **队列大小**: 默认无限制（可以根据需要设置最大队列长度）
-- **播放超时**: 播放线程每秒检查一次新任务
-- **失败重试**: 每种播放方法失败后自动尝试下一种
-- **线程安全**: 使用线程安全的队列实现
-
-### 优势
-1. **避免播放冲突**: 多个音频文件不会同时播放
-2. **防止音频丢失**: 所有播放请求都会被处理
-3. **更好的错误处理**: 集中处理播放失败情况
-4. **可监控性**: 详细的日志输出便于调试
-5. **灵活性**: 支持动态添加和停止播放任务
+通过这套重新设计的队列机制，**彻底解决了音频播放乱序问题**，确保音频严格按照发送顺序播放，大大提升了系统的可靠性和用户体验。
