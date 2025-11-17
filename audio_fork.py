@@ -48,14 +48,20 @@ class AudioForkSession:
     def connect(self):
         """连接到FreeSWITCH ESL"""
         print(f"Connecting to FreeSWITCH at {self.host}:{self.port}")
-        self.con = ESLconnection(self.host, str(self.port), self.password)
-        
-        if not self.con.connected():
-            print(f"Failed to connect to FreeSWITCH: {self.con.getInfo()}")
+        try:
+            self.con = ESLconnection(self.host, str(self.port), self.password)
+            
+            if not self.con.connected():
+                error_info = self.con.getInfo() if hasattr(self.con, 'getInfo') else "Unknown error"
+                print(f"Failed to connect to FreeSWITCH: {error_info}")
+                return False
+            
+            print("Connected to FreeSWITCH")
+            return True
+            
+        except Exception as e:
+            print(f"Exception during connection: {e}")
             return False
-        
-        print("Connected to FreeSWITCH")
-        return True
             
     def wait_for_playback_completion(self, audio_file):
         """等待音频播放完成"""
@@ -413,8 +419,10 @@ class AudioForkSession:
         print(f"Audio will be streamed to: {self.ws_url}")
         
         if not self.connect():
+            print("Failed to connect to FreeSWITCH, exiting...")
             return
             
+        print("Successfully connected, subscribing to events...")
         self.subscribe_events()
         
         try:
