@@ -111,9 +111,9 @@ class AudioForkSession:
                         
                         # 执行播放命令
                         print(f"Executing playback command for file: {audio_file}")
-                        result = self.con.execute("playback", audio_file)
+                        result = self.con.execute("playback", audio_file, self.uuid)
                         
-                        if result:
+                        if result != None:
                             print(f"Playback result: {result.getBody()}")
                         else:
                             print("Playback command returned None - trying alternative methods")
@@ -196,7 +196,7 @@ class AudioForkSession:
         }
         
         # 播放静音
-        self.con.execute("playback", "silence_stream://1000", self.uuid)
+        # self.con.execute("playback", "silence_stream://1000", self.uuid)
         
         # 使用Google TTS播放欢迎消息
         # tts_text = "Hi there. Please go ahead and make a recording and then hangup"
