@@ -112,6 +112,44 @@ async def test_multiple_audio_files():
     except Exception as e:
         print(f"Error: {e}")
 
+async def test_24khz_audio():
+    """测试24000Hz采样率音频"""
+    uri = "ws://localhost:8080"
+    
+    try:
+        async with websockets.connect(uri, subprotocols=['audio.drachtio.org']) as websocket:
+            print(f"Connected to {uri}")
+            
+            # 创建24000Hz采样率的音频数据
+            sample_rate = 24000
+            duration = 2
+            frequency = 800  # 800Hz
+            
+            t = np.linspace(0, duration, int(sample_rate * duration))
+            audio_data = (np.sin(2 * np.pi * frequency * t) * 32767).astype(np.int16)
+            audio_bytes = audio_data.tobytes()
+            audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+            
+            # 发送24000Hz音频
+            play_audio_24k = {
+                "type": "playAudio",
+                "data": {
+                    "audioContentType": "raw",
+                    "sampleRate": 24000,
+                    "audioContent": audio_base64,
+                    "textContent": "Testing 24kHz audio playback - this should play without sample rate mismatch"
+                }
+            }
+            
+            print("Sending 24kHz audio test...")
+            await websocket.send(json.dumps(play_audio_24k))
+            
+            # 等待音频播放完成
+            await asyncio.sleep(4)
+            
+    except Exception as e:
+        print(f"Error: {e}")
+
 if __name__ == "__main__":
     print("Testing Audio Playback Functionality...")
     
@@ -123,6 +161,11 @@ if __name__ == "__main__":
     print("\n=== Testing Multiple Audio Files ===")
     asyncio.run(test_multiple_audio_files())
     
+    # 测试24000Hz采样率
+    print("\n=== Testing 24kHz Audio Playback ===")
+    asyncio.run(test_24khz_audio())
+    
     print("\nTest completed!")
     print("\nNote: Make sure audio_fork.py is running and connected to FreeSWITCH")
     print("You should see the audio playback events being processed in the audio_fork.py console")
+    print("The 24kHz test should now play without sample rate mismatch errors!")

@@ -47,6 +47,41 @@
 - **raw**: 原始 PCM 音频数据（需要指定 sampleRate）
 - **wave/wav**: WAV 格式音频文件
 
+## 采样率配置
+
+### 支持的采样率
+- 8000 Hz (默认)
+- 16000 Hz (推荐)
+- 24000 Hz
+- 32000 Hz
+- 48000 Hz
+- 64000 Hz
+
+### 采样率匹配问题解决方案
+
+**问题**: FreeSWITCH 默认使用 8000Hz 采样率，当播放不同采样率的音频时会出现：
+```
+File sample rate 24000 doesn't match requested rate 8000
+Codec Activated L16@8000hz 1 channels 20ms
+```
+
+**解决方案**: `audio_fork.py` 会自动检测 `sampleRate` 参数，并在播放 raw 音频时使用 FreeSWITCH 的采样率配置：
+
+```bash
+# 自动配置采样率
+playback({playback_sample_rate=24000}/tmp/audio_file.r24)
+```
+
+### 文件扩展名规则
+根据采样率，临时文件使用不同的扩展名：
+- `.r8` - 8000 Hz
+- `.r16` - 16000 Hz  
+- `.r24` - 24000 Hz
+- `.r32` - 32000 Hz
+- `.r48` - 48000 Hz
+- `.r64` - 64000 Hz
+- `.wav` - WAV 格式（不依赖采样率）
+
 ## 使用方法
 
 ### 1. 启动 audio_fork.py
@@ -102,3 +137,5 @@ Playback result: +OK Success
 3. 音频播放是异步的，不会阻塞其他操作
 4. 支持同时播放多个音频文件（队列播放）
 5. 使用 `killAudio` 可以立即停止当前播放
+6. **重要**: 对于 raw 音频文件，确保正确设置 `sampleRate` 参数，否则会出现采样率不匹配错误
+7. **建议**: 使用 16000Hz 采样率作为默认设置，平衡音质和性能

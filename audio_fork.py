@@ -97,9 +97,14 @@ class AudioForkSession:
             if audio_file and self.uuid:
                 # 播放音频文件给caller
                 if audio_content_type == 'raw':
-                    # 对于raw音频文件，使用playback命令播放
+                    # 对于raw音频文件，使用playback命令播放，指定采样率
                     print(f"Playing raw audio file: {audio_file}")
-                    result = self.con.execute("playback", audio_file, self.uuid)
+                    if sample_rate:
+                        # 使用playback的采样率参数
+                        playback_cmd = f"{{playback_sample_rate={sample_rate}}}{audio_file}"
+                        result = self.con.execute("playback", playback_cmd, self.uuid)
+                    else:
+                        result = self.con.execute("playback", audio_file, self.uuid)
                     if result:
                         print(f"Playback result: {result.getBody()}")
                 elif audio_content_type == 'wave' or audio_content_type == 'wav':
