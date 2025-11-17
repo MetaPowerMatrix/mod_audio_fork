@@ -100,30 +100,29 @@ class AudioForkSession:
                     # 对于raw音频文件，使用playback命令播放，指定采样率
                     try:
                         # 执行播放命令
-                        print(f"Executing playback command for file: {audio_file}@{self.uuid}")
-                        result = self.con.execute("playback", audio_file)
+                        # print(f"Executing playback command for file: {audio_file}@{self.uuid}")
+                        # result = self.con.execute("playback", audio_file)
                         
-                        if result.getBody() != None:
-                            print(f"Playback result: {result.getBody()}")
+                        # if result.getBody() != None:
+                        #     print(f"Playback result: {result.getBody()}")
+                        # else:
+                            # print("Playback command returned None - trying alternative methods")
+                        api_cmd = f"uuid_broadcast {self.uuid} {audio_file}"
+                        print(f"Trying API command: {api_cmd}")
+                        api_result = self.con.api(api_cmd)
+                        if api_result:
+                            print(f"API broadcast result: {api_result.getBody()}")
                         else:
-                            print("Playback command returned None - trying alternative methods")
-                            # 尝试使用api命令
-                            api_cmd = f"uuid_broadcast {self.uuid} {audio_file}"
-                            print(f"Trying API command: {api_cmd}")
-                            api_result = self.con.api(api_cmd)
-                            if api_result:
-                                print(f"API broadcast result: {api_result.getBody()}")
-                            else:
-                                print("API command also failed")
-                                
-                            # 尝试使用uuid_displace
-                            print("Trying uuid_displace command...")
-                            displace_cmd = f"uuid_displace {self.uuid} start {audio_file}"
-                            displace_result = self.con.api(displace_cmd)
-                            if displace_result:
-                                print(f"Displace result: {displace_result.getBody()}")
-                            else:
-                                print("Displace command also failed")
+                            print("API command also failed")
+                            
+                        # 尝试使用uuid_displace
+                        # print("Trying uuid_displace command...")
+                        # displace_cmd = f"uuid_displace {self.uuid} start {audio_file}"
+                        # displace_result = self.con.api(displace_cmd)
+                        # if displace_result:
+                        #     print(f"Displace result: {displace_result.getBody()}")
+                        # else:
+                        #     print("Displace command also failed")
                                 
                     except Exception as e:
                         print(f"Exception during playback: {e}")
