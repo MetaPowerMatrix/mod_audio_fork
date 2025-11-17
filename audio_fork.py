@@ -10,7 +10,14 @@ import argparse
 import threading
 import queue
 import time
+import os
 from ESL import ESLconnection
+
+try:
+    import librosa
+    LIBROSA_AVAILABLE = True
+except ImportError:
+    LIBROSA_AVAILABLE = False
 
 # 事件定义
 EVENT_TRANSCRIPT = "mod_audio_fork::transcription"
@@ -46,6 +53,39 @@ class AudioForkSession:
         if not self.con.connected():
             print(f"Failed to connect to FreeSWITCH: {self.con.getInfo()}")
             return False
+            
+    def wait_for_playback_completion(self, audio_file):
+        """等待音频播放完成"""
+        try:
+            # 默认等待时间
+            wait_time = 2.0
+            
+            # 根据文件大小估算播放时长
+            if os.path.exists(audio_file):
+                try:
+                    # 尝试使用librosa获取准确的音频时长
+                    if LIBROSA_AVAILABLE:
+                        duration = librosa.get_duration(filename=audio_file)
+                        wait_time = max(duration, 0.5)  # 最小0.5秒
+                        print(f"Audio duration from librosa: {duration:.2f}s")
+                    else:
+                        # 如果没有librosa，使用文件大小估算
+                        file_size = os.path.getsize(audio_file)
+                        # 估算：24kHz, mono, 16bit (2 bytes per sample)
+                        estimated_duration = file_size / (24000 * 2)
+                        wait_time = max(estimated_duration, 0.5)  # 最小0.5秒
+                        print(f"Estimated duration from file size: {estimated_duration:.2f}s")
+                except Exception as e:
+                    print(f"Failed to get audio duration, using default: {e}")
+            
+            # 限制最大等待时间
+            wait_time = min(wait_time, 15.0)
+            
+            print(f"Waiting {wait_time:.2f} seconds for audio playback completion: {os.path.basename(audio_file)}")
+            time.sleep(wait_time)
+            
+        except Exception as e:
+            print(f"Error waiting for playback completion: {e}")
             
         print("Connected to FreeSWITCH")
         return True
@@ -120,11 +160,16 @@ class AudioForkSession:
         
         try:
             if audio_content_type == 'raw':
-                self.play_raw_audio(audio_file, sample_rate)
+                success = self.play_raw_audio(audio_file, sample_rate)
             elif audio_content_type == 'wave' or audio_content_type == 'wav':
-                self.play_wav_audio(audio_file)
+                success = self.play_wav_audio(audio_file)
             else:
                 print(f"Unsupported audio content type: {audio_content_type}")
+                success = False
+                
+            # 等待播放完成，确保顺序播放
+            if success:
+                self.wait_for_playback_completion(audio_file)
                 
         except Exception as e:
             print(f"Exception during playback task processing: {e}")
@@ -159,7 +204,7 @@ class AudioForkSession:
                 if result:
                     result_body = result.getBody() if hasattr(result, 'getBody') else str(result)
                     print(f"Method {i} succeeded: {result_body}")
-                    return
+                    return True
                 else:
                     print(f"Method {i} returned None")
                     
@@ -167,6 +212,7 @@ class AudioForkSession:
                 print(f"Method {i} failed: {e}")
                 
         print("All playback methods failed for raw audio")
+        return False
         
     def play_wav_audio(self, audio_file):
         """播放WAV音频文件"""
@@ -176,11 +222,14 @@ class AudioForkSession:
             result = self.con.execute("playback", audio_file, self.uuid)
             if result:
                 print(f"WAV playback result: {result.getBody()}")
+                return True
             else:
                 print("WAV playback returned None")
+                return False
                 
         except Exception as e:
             print(f"Exception during WAV playback: {e}")
+            return False
         
     def on_connect(self, event):
         """连接成功事件处理"""

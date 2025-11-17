@@ -198,6 +198,31 @@ Method 1 succeeded: +OK Success
 当收到 `killAudio` 事件时：
 1. **清空队列**: 移除所有待播放的音频任务
 2. **停止当前播放**: 使用多种方法尝试停止当前播放
+
+### 顺序播放保证
+为了确保音频播放的顺序性和完整性，系统实现了以下机制：
+
+1. **播放完成等待**: 每个音频播放后会等待播放完成才处理下一个任务
+2. **音频时长计算**: 自动计算音频文件时长，确保等待时间准确
+3. **顺序处理**: 严格按照队列顺序播放，不会出现乱序问题
+4. **状态跟踪**: 实时跟踪播放状态，确保一次只播放一个音频
+
+等待时间计算方式：
+```
+- 使用 librosa 库获取准确音频时长（推荐）
+- 回退方案：根据文件大小估算（24kHz, mono, 16bit）
+- 最小等待时间：0.5秒
+- 最大等待时间：15秒
+```
+
+示例日志：
+```
+Processing playback task: /tmp/audio1.r16 (type: raw, rate: 16000)
+Playing raw audio file: /tmp/audio1.r16 (sample rate: 16000)
+Method 1 succeeded: +OK Success
+Waiting 3.25 seconds for audio playback completion: audio1.r16
+Processing playback task: /tmp/audio2.r16 (type: raw, rate: 16000)
+...```
 3. **状态重置**: 重置播放状态，准备接收新任务
 
 ### 播放失败处理
