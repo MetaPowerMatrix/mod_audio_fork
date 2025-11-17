@@ -53,6 +53,9 @@ class AudioForkSession:
         if not self.con.connected():
             print(f"Failed to connect to FreeSWITCH: {self.con.getInfo()}")
             return False
+        
+        print("Connected to FreeSWITCH")
+        return True
             
     def wait_for_playback_completion(self, audio_file):
         """等待音频播放完成"""
