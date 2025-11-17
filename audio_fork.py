@@ -7,6 +7,9 @@ Freeswitch audio streaming application using ESL
 import sys
 import json
 import argparse
+import threading
+import queue
+import time
 from ESL import ESLconnection
 
 # 事件定义
@@ -28,6 +31,12 @@ class AudioForkSession:
         self.password = password
         self.con = None
         self.uuid = None
+        
+        # 音频播放队列和线程
+        self.playback_queue = queue.Queue()
+        self.playback_thread = None
+        self.playback_active = False
+        self.current_playback_file = None
         
     def connect(self):
         """连接到FreeSWITCH ESL"""
@@ -54,6 +63,125 @@ class AudioForkSession:
         self.con.events("plain", "DTMF") 
         self.con.events("plain", "CHANNEL_ANSWER")
         
+    def start_playback_thread(self):
+        """启动音频播放处理线程"""
+        if self.playback_thread is None or not self.playback_thread.is_alive():
+            self.playback_active = True
+            self.playback_thread = threading.Thread(target=self.playback_worker, daemon=True)
+            self.playback_thread.start()
+            print("Audio playback thread started")
+            
+    def stop_playback_thread(self):
+        """停止音频播放处理线程"""
+        self.playback_active = False
+        # 发送停止信号到队列
+        self.playback_queue.put(None)
+        if self.playback_thread and self.playback_thread.is_alive():
+            self.playback_thread.join(timeout=5)
+            print("Audio playback thread stopped")
+            
+    def playback_worker(self):
+        """音频播放工作线程"""
+        print("Playback worker thread started")
+        while self.playback_active:
+            try:
+                # 从队列获取音频播放任务（超时1秒，允许定期检查停止信号）
+                playback_task = self.playback_queue.get(timeout=1)
+                
+                if playback_task is None:  # 停止信号
+                    break
+                    
+                if not self.playback_active:  # 检查是否还需要继续处理
+                    break
+                    
+                # 处理音频播放任务
+                self.process_playback_task(playback_task)
+                
+            except queue.Empty:
+                # 队列为空，继续循环
+                continue
+            except Exception as e:
+                print(f"Error in playback worker: {e}")
+                
+        print("Playback worker thread stopped")
+        
+    def process_playback_task(self, task):
+        """处理单个音频播放任务"""
+        audio_file = task.get('file')
+        audio_content_type = task.get('audioContentType')
+        sample_rate = task.get('sampleRate')
+        
+        if not audio_file or not self.uuid:
+            print("Missing audio file or UUID for playback")
+            return
+            
+        self.current_playback_file = audio_file
+        print(f"Processing playback task: {audio_file} (type: {audio_content_type}, rate: {sample_rate})")
+        
+        try:
+            if audio_content_type == 'raw':
+                self.play_raw_audio(audio_file, sample_rate)
+            elif audio_content_type == 'wave' or audio_content_type == 'wav':
+                self.play_wav_audio(audio_file)
+            else:
+                print(f"Unsupported audio content type: {audio_content_type}")
+                
+        except Exception as e:
+            print(f"Exception during playback task processing: {e}")
+        finally:
+            self.current_playback_file = None
+            
+    def play_raw_audio(self, audio_file, sample_rate):
+        """播放原始音频文件"""
+        print(f"Playing raw audio file: {audio_file} (sample rate: {sample_rate})")
+        
+        # 尝试多种播放方法
+        methods = [
+            # 方法1: 使用uuid_broadcast
+            lambda: self.con.api(f"uuid_broadcast {self.uuid} {audio_file}"),
+            
+            # 方法2: 使用playback命令（设置采样率）
+            lambda: self.con.execute("set", f"playback_sample_rate={sample_rate}", self.uuid) and 
+                   self.con.execute("playback", audio_file, self.uuid),
+                   
+            # 方法3: 使用uuid_displace
+            lambda: self.con.api(f"uuid_displace {self.uuid} start {audio_file}"),
+            
+            # 方法4: 简单的playback
+            lambda: self.con.execute("playback", audio_file, self.uuid)
+        ]
+        
+        for i, method in enumerate(methods, 1):
+            try:
+                print(f"Trying playback method {i}...")
+                result = method()
+                
+                if result:
+                    result_body = result.getBody() if hasattr(result, 'getBody') else str(result)
+                    print(f"Method {i} succeeded: {result_body}")
+                    return
+                else:
+                    print(f"Method {i} returned None")
+                    
+            except Exception as e:
+                print(f"Method {i} failed: {e}")
+                
+        print("All playback methods failed for raw audio")
+        
+    def play_wav_audio(self, audio_file):
+        """播放WAV音频文件"""
+        print(f"Playing WAV audio file: {audio_file}")
+        
+        try:
+            result = self.con.execute("playback", audio_file, self.uuid)
+            if result:
+                print(f"WAV playback result: {result.getBody()}")
+            else:
+                print("WAV playback returned None")
+                
+        except Exception as e:
+            print(f"Exception during WAV playback: {e}")
+        
     def on_connect(self, event):
         """连接成功事件处理"""
         print("successfully connected")
@@ -75,7 +203,7 @@ class AudioForkSession:
         print(f"got event: {event.getBody()}")
         
     def handle_play_audio(self, event):
-        """处理播放音频事件"""
+        """处理播放音频事件 - 现在将音频任务加入队列"""
         try:
             event_body = event.getBody()
             if not event_body:
@@ -95,52 +223,22 @@ class AudioForkSession:
             print(f"  Audio file: {audio_file}")
             
             if audio_file and self.uuid:
-                # 播放音频文件给caller
-                if audio_content_type == 'raw':
-                    # 对于raw音频文件，使用playback命令播放，指定采样率
-                    try:
-                        # 执行播放命令
-                        # print(f"Executing playback command for file: {audio_file}@{self.uuid}")
-                        # result = self.con.execute("playback", audio_file)
-                        
-                        # if result.getBody() != None:
-                        #     print(f"Playback result: {result.getBody()}")
-                        # else:
-                            # print("Playback command returned None - trying alternative methods")
-                        api_cmd = f"uuid_broadcast {self.uuid} {audio_file}"
-                        print(f"Trying API command: {api_cmd}")
-                        api_result = self.con.api(api_cmd)
-                        if api_result:
-                            print(f"API broadcast result: {api_result.getBody()}")
-                        else:
-                            print("API command also failed")
-                            
-                        # 尝试使用uuid_displace
-                        # print("Trying uuid_displace command...")
-                        # displace_cmd = f"uuid_displace {self.uuid} start {audio_file}"
-                        # displace_result = self.con.api(displace_cmd)
-                        # if displace_result:
-                        #     print(f"Displace result: {displace_result.getBody()}")
-                        # else:
-                        #     print("Displace command also failed")
-                                
-                    except Exception as e:
-                        print(f"Exception during playback: {e}")
-                        
-                elif audio_content_type == 'wave' or audio_content_type == 'wav':
-                    # 对于wav文件，直接播放
-                    print(f"Playing wav audio file: {audio_file}")
-                    try:
-                        result = self.con.execute("playback", audio_file, self.uuid)
-                        if result:
-                            print(f"Playback result: {result.getBody()}")
-                        else:
-                            print("WAV playback returned None")
-                    except Exception as e:
-                        print(f"Exception during WAV playback: {e}")
-                else:
-                    print(f"Unsupported audio content type: {audio_content_type}")
-                                            
+                # 创建音频播放任务
+                playback_task = {
+                    'file': audio_file,
+                    'audioContentType': audio_content_type,
+                    'sampleRate': sample_rate,
+                    'textContent': text_content,
+                    'timestamp': time.time()
+                }
+                
+                # 将任务加入播放队列
+                try:
+                    self.playback_queue.put(playback_task, block=False)
+                    print(f"Added playback task to queue. Queue size: {self.playback_queue.qsize()}")
+                except queue.Full:
+                    print("Playback queue is full, dropping audio task")
+                    
             else:
                 print("Missing audio file path or UUID")
                 
@@ -150,13 +248,40 @@ class AudioForkSession:
             print(f"Error handling play_audio event: {e}")
             
     def handle_kill_audio(self, event):
-        """处理停止播放音频事件"""
+        """处理停止播放音频事件 - 清空队列并停止当前播放"""
         print("Received kill_audio event - stopping current playback")
+        
+        # 清空播放队列
+        while not self.playback_queue.empty():
+            try:
+                self.playback_queue.get_nowait()
+            except queue.Empty:
+                break
+        print(f"Cleared playback queue. Current queue size: {self.playback_queue.qsize()}")
+        
+        # 停止当前播放
         if self.uuid:
-            # 停止当前播放
-            result = self.con.execute("stop", "", self.uuid)
-            if result:
-                print(f"Stop playback result: {result.getBody()}")
+            try:
+                # 尝试多种停止播放的方法
+                methods = [
+                    lambda: self.con.execute("stop", "", self.uuid),
+                    lambda: self.con.api(f"uuid_broadcast {self.uuid} stop"),
+                    lambda: self.con.api(f"uuid_displace {self.uuid} stop")
+                ]
+                
+                for i, method in enumerate(methods, 1):
+                    try:
+                        result = method()
+                        if result:
+                            print(f"Stop method {i} succeeded: {result.getBody() if hasattr(result, 'getBody') else str(result)}")
+                            break
+                    except Exception as e:
+                        print(f"Stop method {i} failed: {e}")
+                        
+            except Exception as e:
+                print(f"Exception during stop playback: {e}")
+                
+        print("Playback stopped")
         
     def handle_dtmf(self, event):
         """处理DTMF事件"""
@@ -173,6 +298,10 @@ class AudioForkSession:
         from_uri = event.getHeader("variable_sip_from_uri")
         
         print(f"Channel answered: {self.uuid}")
+        
+        # 启动音频播放线程
+        self.start_playback_thread()
+        
         self.init_audio_fork(call_id, to_uri, from_uri)
         
     def init_audio_fork(self, call_id, to_uri, from_uri):
@@ -249,6 +378,9 @@ class AudioForkSession:
         except KeyboardInterrupt:
             print("\nShutting down...")
         finally:
+            # 停止播放线程
+            self.stop_playback_thread()
+            
             if self.con and self.con.connected():
                 self.con.disconnect()
                 print("Disconnected from FreeSWITCH")
