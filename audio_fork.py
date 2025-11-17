@@ -113,7 +113,7 @@ class AudioForkSession:
                         print(f"Executing playback command for file: {audio_file}")
                         result = self.con.execute("playback", audio_file, self.uuid)
                         
-                        if result != None:
+                        if result.getBody() != None:
                             print(f"Playback result: {result.getBody()}")
                         else:
                             print("Playback command returned None - trying alternative methods")
