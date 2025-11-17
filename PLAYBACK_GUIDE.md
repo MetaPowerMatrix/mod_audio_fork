@@ -130,6 +130,35 @@ Playing raw audio file: /tmp/7dd5e34e-5db4-4edb-a166-757e5d29b941_2.tmp.r8
 Playback result: +OK Success
 ```
 
+## 故障排除
+
+### 播放结果为 None
+如果看到 `Playback result: None`，说明播放命令执行失败。系统会自动尝试以下替代方案：
+
+1. **设置采样率变量** - 先执行 `set playback_sample_rate=<rate>`
+2. **标准播放命令** - 执行 `playback <filename>`
+3. **广播命令** - 执行 `uuid_broadcast <uuid> <filename>`
+4. **音频位移命令** - 执行 `uuid_displace <uuid> start <filename>`
+
+### 调试步骤
+1. 检查 FreeSWITCH 日志获取详细错误信息
+2. 确认音频文件存在且 FreeSWITCH 有读取权限
+3. 验证文件格式是否正确（16-bit PCM，小端序）
+4. 尝试手动在 FreeSWITCH CLI 执行相同命令
+
+### 手动测试命令
+在 FreeSWITCH CLI 中可以手动测试：
+```bash
+# 设置采样率
+uuid_setvar <uuid> playback_sample_rate 24000
+
+# 播放音频
+uuid_broadcast <uuid> /tmp/audio_file.r24
+
+# 或使用位移
+uuid_displace <uuid> start /tmp/audio_file.r24
+```
+
 ## 注意事项
 
 1. 临时音频文件会在 FreeSWITCH 会话结束时自动删除
