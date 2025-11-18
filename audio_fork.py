@@ -95,9 +95,17 @@ class AudioForkSession:
             if uuid not in self.playback_status or not self.playback_status[uuid]['playing']:
                 self.playback_status[uuid]['playing'] = True
                 
-                # 启动播放线程
+                # 启动播放线程 - 提高线程优先级避免卡顿
                 thread = threading.Thread(target=self.audio_playback_worker, args=(uuid,), daemon=True)
                 thread.start()
+                
+                # 尝试提高线程优先级（仅在某些系统上有效）
+                try:
+                    if hasattr(thread, 'set_priority'):
+                        thread.set_priority(thread.PRIORITY_HIGH)
+                        self.logger.info(f"Set high priority for playback thread: {uuid}")
+                except Exception as e:
+                    self.logger.debug(f"Could not set thread priority: {e}")
                 self.playback_threads[uuid] = thread
                 self.logger.info(f"Started audio playback thread for session: {uuid}")
             
@@ -138,6 +146,15 @@ class AudioForkSession:
             
     def audio_playback_worker(self, uuid: str):
         """音频播放工作线程 - 参考freeswitch_audio_monitor.py的实现"""
+        # 设置线程优先级和调度策略（尽可能减少卡顿）
+        try:
+            import os
+            if hasattr(os, 'nice'):
+                os.nice(-5)  # 提高进程优先级（负值表示更高优先级）
+                self.logger.info(f"Set nice value for playback thread: {uuid}")
+        except Exception as e:
+            self.logger.debug(f"Could not set nice value: {e}")
+            
         self.logger.info(f"Audio playback worker thread started for session: {uuid}")
         try:
             while True:
@@ -163,8 +180,13 @@ class AudioForkSession:
                         # 执行音频播放
                         if audio_item['audioContentType'] == 'wav' or audio_item['audioContentType'] == 'wave':
                             self.play_wav_audio(audio_item['file'], uuid)
+                        else:
+                            self.play_raw_audio(audio_item['file'], audio_item.get('sampleRate', 8000), uuid)
+                        
                         # 等待播放完成 - 这是关键，确保顺序播放
+                        # 使用较短的等待时间避免卡顿
                         # self.wait_for_playback_completion(audio_item['file'])
+                        time.sleep(0.1)  # 短暂等待，让FreeSWITCH处理播放
                         
                     except Exception as e:
                         self.logger.error(f"Error executing audio playback for {uuid}: {e}")
@@ -216,18 +238,18 @@ class AudioForkSession:
             self.logger.error(f"Error waiting for playback completion: {e}")
             
     def play_raw_audio(self, audio_file, sample_rate, uuid):
-        """播放原始音频文件"""
+        """播放原始音频文件 - 优化播放性能"""
         self.logger.info(f"Playing raw audio file: {audio_file} (sample rate: {sample_rate})")
         
-        # 尝试多种播放方法
+        # 尝试多种播放方法 - 优先使用非阻塞方法
         methods = [
-            # 方法1: 使用uuid_broadcast
+            # 方法1: 使用uuid_broadcast（最快，非阻塞）
             lambda: self.con.api(f"uuid_broadcast {uuid} {audio_file}"),
-                               
-            # 方法3: 使用uuid_displace
+            
+            # 方法2: 使用uuid_displace（中等速度）
             lambda: self.con.api(f"uuid_displace {uuid} start {audio_file}"),
             
-            # 方法4: 简单的playback
+            # 方法3: 简单的playback（最稳定但可能阻塞）
             lambda: self.con.execute("playback", audio_file, uuid)
         ]
         
@@ -249,16 +271,24 @@ class AudioForkSession:
         self.logger.error("All playback methods failed for raw audio")
         
     def play_wav_audio(self, audio_file, uuid):
-        """播放WAV音频文件"""
+        """播放WAV音频文件 - 优化播放性能"""
         self.logger.info(f"Playing WAV audio file: {audio_file} for UUID: {uuid}")
         
         try:
-            result = self.con.execute("playback", audio_file, uuid)
+            # 使用更快的API调用方式，避免阻塞
+            result = self.con.api(f"uuid_broadcast {uuid} {audio_file}")
             if result:
                 result_body = result.getBody() if hasattr(result, 'getBody') else str(result)
-                self.logger.info(f"playback succeeded: {result_body}")
+                self.logger.info(f"WAV playback succeeded: {result_body}")
             else:
-                self.logger.warning("WAV playback returned None")
+                # 如果api失败，尝试execute方式
+                self.logger.warning("API playback failed, trying execute method")
+                result = self.con.execute("playback", audio_file, uuid)
+                if result:
+                    result_body = result.getBody() if hasattr(result, 'getBody') else str(result)
+                    self.logger.info(f"Execute playback succeeded: {result_body}")
+                else:
+                    self.logger.warning("Both playback methods returned None")
                 
         except Exception as e:
             self.logger.error(f"Exception during WAV playback: {e}")
@@ -345,6 +375,9 @@ class AudioForkSession:
                 if not self.playback_status[event_uuid]['playing']:
                     self.logger.info(f"Starting playback thread for {event_uuid}")
                     self.start_playback_thread(event_uuid)
+                else:
+                    # 如果已经在播放，只记录队列状态
+                    self.logger.debug(f"Playback already active for {event_uuid}, added to queue (size: {self.playback_status[event_uuid]['queue_size']})")
                     
             else:
                 self.logger.error("Missing audio file path or UUID")
