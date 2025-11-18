@@ -8,7 +8,7 @@ import sys
 import json
 import argparse
 import threading
-import queue
+import asyncio
 import time
 import logging
 from datetime import datetime
@@ -46,10 +46,9 @@ class AudioForkSession:
         self.logger = logging.getLogger(__name__)
         
         # 音频播放队列和线程 - 参考freeswitch_audio_monitor.py的实现
-        self.audio_queues = defaultdict(queue.Queue)  # 每个UUID对应一个音频队列
-        self.playback_threads = defaultdict(threading.Thread)  # 每个UUID对应一个播放线程
+        self.audio_queues = defaultdict(asyncio.Queue)  # 每个UUID对应一个音频队列
+        self.playback_threads = defaultdict(asyncio.Task)  # 每个UUID对应一个播放线程
         self.playback_status = defaultdict(dict)  # 播放状态跟踪
-        self.queue_lock = threading.RLock()  # 队列操作锁（可重入锁）
         
     def connect(self):
         """连接到FreeSWITCH ESL"""
@@ -78,36 +77,25 @@ class AudioForkSession:
         
     def create_audio_queue_for_session(self, uuid: str):
         """为指定会话创建音频播放队列"""
-        with self.queue_lock:
-            if uuid not in self.audio_queues:
-                self.audio_queues[uuid] = queue.Queue()
-                self.playback_status[uuid] = {
-                    'playing': False,
-                    'queue_size': 0,
-                    'current_file': None,
-                    'last_play_time': None
-                }
-                self.logger.info(f"Created audio queue for session: {uuid}")
+        if uuid not in self.audio_queues:
+            self.audio_queues[uuid] = asyncio.Queue()
+            self.playback_status[uuid] = {
+                'playing': False,
+                'queue_size': 0,
+                'current_file': None,
+                'last_play_time': None
+            }
+            self.logger.info(f"Created audio queue for session: {uuid}")
     
     def start_playback_thread(self, uuid: str):
         """启动音频播放处理线程"""
-        with self.queue_lock:
-            if uuid not in self.playback_status or not self.playback_status[uuid]['playing']:
-                self.playback_status[uuid]['playing'] = True
-                
-                # 启动播放线程 - 提高线程优先级避免卡顿
-                thread = threading.Thread(target=self.audio_playback_worker, args=(uuid,), daemon=True)
-                thread.start()
-                
-                # 尝试提高线程优先级（仅在某些系统上有效）
-                try:
-                    if hasattr(thread, 'set_priority'):
-                        thread.set_priority(thread.PRIORITY_HIGH)
-                        self.logger.info(f"Set high priority for playback thread: {uuid}")
-                except Exception as e:
-                    self.logger.debug(f"Could not set thread priority: {e}")
-                self.playback_threads[uuid] = thread
-                self.logger.info(f"Started audio playback thread for session: {uuid}")
+        if uuid not in self.playback_status or not self.playback_status[uuid]['playing']:
+            self.playback_status[uuid]['playing'] = True
+            
+            consumer_task = asyncio.create_task(asyncio.to_thread(self.audio_playback_worker))
+
+            self.playback_threads[uuid] = consumer_task
+            self.logger.info(f"Started audio playback thread for session: {uuid}")
             
     def stop_playback_thread(self, uuid: str = None):
         """停止音频播放处理线程"""
@@ -122,45 +110,34 @@ class AudioForkSession:
     def stop_audio_queue(self, uuid: str):
         """停止指定会话的音频播放队列"""
         try:
-            with self.queue_lock:
-                if uuid in self.audio_queues:
-                    # 添加停止信号到队列
-                    self.audio_queues[uuid].put(None)
-                    
-                    # 清空队列中剩余的项目
-                    while not self.audio_queues[uuid].empty():
-                        try:
-                            self.audio_queues[uuid].get_nowait()
-                            self.audio_queues[uuid].task_done()
-                        except queue.Empty:
-                            break
-                    
-                    # 标记为非播放状态
-                    if uuid in self.playback_status:
-                        self.playback_status[uuid]['playing'] = False
-                    
-                    self.logger.info(f"Stopped audio queue for session: {uuid}")
+            if uuid in self.audio_queues:
+                # 添加停止信号到队列
+                self.audio_queues[uuid].put(None)
+                
+                # 清空队列中剩余的项目
+                while not self.audio_queues[uuid].empty():
+                    try:
+                        self.audio_queues[uuid].get_nowait()
+                        self.audio_queues[uuid].task_done()
+                    except queue.Empty:
+                        break
+                
+                # 标记为非播放状态
+                if uuid in self.playback_status:
+                    self.playback_status[uuid]['playing'] = False
+                
+                self.logger.info(f"Stopped audio queue for session: {uuid}")
                     
         except Exception as e:
             self.logger.error(f"Error stopping audio queue for {uuid}: {e}")
             
-    def audio_playback_worker(self, uuid: str):
-        """音频播放工作线程 - 参考freeswitch_audio_monitor.py的实现"""
-        # 设置线程优先级和调度策略（尽可能减少卡顿）
-        try:
-            import os
-            if hasattr(os, 'nice'):
-                os.nice(-5)  # 提高进程优先级（负值表示更高优先级）
-                self.logger.info(f"Set nice value for playback thread: {uuid}")
-        except Exception as e:
-            self.logger.debug(f"Could not set nice value: {e}")
-            
+    async def audio_playback_worker(self, uuid: str):
         self.logger.info(f"Audio playback worker thread started for session: {uuid}")
         try:
             while True:
                 try:
                     # 从队列获取音频播放任务（超时1秒，允许定期检查停止信号）
-                    audio_item = self.audio_queues[uuid].get(timeout=1)
+                    audio_item = await self.audio_queues[uuid].get()
                     
                     # 检查是否为停止信号
                     if audio_item is None:
@@ -172,10 +149,9 @@ class AudioForkSession:
                     
                     try:
                         # 更新播放状态
-                        with self.queue_lock:
-                            self.playback_status[uuid]['current_file'] = audio_item['file']
-                            self.playback_status[uuid]['last_play_time'] = datetime.now()
-                            self.playback_status[uuid]['queue_size'] = self.audio_queues[uuid].qsize()
+                        self.playback_status[uuid]['current_file'] = audio_item['file']
+                        self.playback_status[uuid]['last_play_time'] = datetime.now()
+                        self.playback_status[uuid]['queue_size'] = self.audio_queues[uuid].qsize()
                         
                         # 执行音频播放
                         if audio_item['audioContentType'] == 'wav' or audio_item['audioContentType'] == 'wave':
@@ -185,7 +161,7 @@ class AudioForkSession:
                         
                         # 等待播放完成 - 这是关键，确保顺序播放
                         # 使用较短的等待时间避免卡顿
-                        yield self.wait_for_playback_completion(audio_item['file'])
+                        self.wait_for_playback_completion(audio_item['file'])
                         # time.sleep(0.1)  # 短暂等待，让FreeSWITCH处理播放
                         
                     except Exception as e:
@@ -194,17 +170,13 @@ class AudioForkSession:
                         # 无论播放成功与否，都要标记任务完成
                         self.audio_queues[uuid].task_done()
                         
-                except queue.Empty:
-                    # 队列空了，继续等待
-                    continue
                 except Exception as e:
                     self.logger.error(f"Error in audio playback worker for {uuid}: {e}")
                     continue
         finally:
             # 清理播放状态
-            with self.queue_lock:
-                self.playback_status[uuid]['playing'] = False
-                self.playback_status[uuid]['current_file'] = None
+            self.playback_status[uuid]['playing'] = False
+            self.playback_status[uuid]['current_file'] = None
             self.logger.info(f"Audio playback worker thread stopped for session: {uuid}")
         
     def wait_for_playback_completion(self, file_path: str):
@@ -354,20 +326,19 @@ class AudioForkSession:
                     'textContent': text_content
                 }
                 
-                # 将任务加入播放队列
-                with self.queue_lock:
-                    # 检查队列大小限制
-                    max_queue_size = 100  # 默认最大队列大小
-                    if self.audio_queues[event_uuid].qsize() >= max_queue_size:
-                        self.logger.warning(f"Audio queue for {event_uuid} is full (size: {self.audio_queues[event_uuid].qsize()}), dropping oldest item")
-                        try:
-                            # 移除最旧的项目
-                            self.audio_queues[event_uuid].get_nowait()
-                        except queue.Empty:
-                            pass
-                    
-                    self.audio_queues[event_uuid].put(audio_item)
-                    self.playback_status[event_uuid]['queue_size'] = self.audio_queues[event_uuid].qsize()
+                loop = asyncio.get_running_loop()
+                max_queue_size = 100  # 默认最大队列大小
+                if self.audio_queues[event_uuid].qsize() >= max_queue_size:
+                    self.logger.warning(f"Audio queue for {event_uuid} is full (size: {self.audio_queues[event_uuid].qsize()}), dropping oldest item")
+                    try:
+                        self.audio_queues[event_uuid].get_nowait()
+                    except queue.Empty:
+                        pass
+                
+                asyncio.run_coroutine_threadsafe(
+                    self.audio_queues[event_uuid].put(audio_item), loop
+                ).result()
+                self.playback_status[event_uuid]['queue_size'] = self.audio_queues[event_uuid].qsize()
                 
                 self.logger.info(f"Added audio to queue for {event_uuid}: {audio_file} (queue size: {self.playback_status[event_uuid]['queue_size']})")
                 
@@ -431,13 +402,12 @@ class AudioForkSession:
 
     def cleanup_session(self, uuid: str):
         """清理会话资源"""
-        with self.queue_lock:
-            if uuid in self.audio_queues:
-                del self.audio_queues[uuid]
-            if uuid in self.playback_threads:
-                del self.playback_threads[uuid]
-            if uuid in self.playback_status:
-                del self.playback_status[uuid]
+        if uuid in self.audio_queues:
+            del self.audio_queues[uuid]
+        if uuid in self.playback_threads:
+            del self.playback_threads[uuid]
+        if uuid in self.playback_status:
+            del self.playback_status[uuid]
 
     def handle_hangup(self, event):
         """处理挂断事件"""
@@ -451,11 +421,9 @@ class AudioForkSession:
             self.logger.info(f"Cleaned up resources for UUID {event_uuid}")
         else:
             self.logger.warning("No UUID found in hangup event, stopping all audio")
-            # 停止所有音频
-            with self.queue_lock:
-                for uuid in list(self.audio_queues.keys()):
-                    self.stop_audio_queue(uuid)
-                    self.cleanup_session(uuid)
+            for uuid in list(self.audio_queues.keys()):
+                self.stop_audio_queue(uuid)
+                self.cleanup_session(uuid)
             self.logger.info("All audio stopped and resources cleaned up")
             
     def handle_hangup_complete(self, event):
@@ -471,10 +439,9 @@ class AudioForkSession:
         else:
             self.logger.warning("No UUID found in hangup complete event, stopping all audio")
             # 停止所有音频
-            with self.queue_lock:
-                for uuid in list(self.audio_queues.keys()):
-                    self.stop_audio_queue(uuid)
-                    self.cleanup_session(uuid)
+            for uuid in list(self.audio_queues.keys()):
+                self.stop_audio_queue(uuid)
+                self.cleanup_session(uuid)
             self.logger.info("All audio stopped and resources cleaned up")
         
     def init_audio_fork(self, call_id, to_uri, from_uri):
