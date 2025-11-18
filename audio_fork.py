@@ -10,10 +10,12 @@ import argparse
 import threading
 import queue
 import time
-import os
+import logging
 from datetime import datetime
 from collections import defaultdict
 from ESL import ESLconnection
+import librosa
+import os
 
 # 事件定义
 EVENT_TRANSCRIPT = "mod_audio_fork::transcription"
@@ -35,6 +37,14 @@ class AudioForkSession:
         self.con = None
         self.uuid = None
         
+        # 配置日志
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        self.logger = logging.getLogger(__name__)
+        
         # 音频播放队列和线程 - 参考freeswitch_audio_monitor.py的实现
         self.audio_queues = defaultdict(queue.Queue)  # 每个UUID对应一个音频队列
         self.playback_threads = defaultdict(threading.Thread)  # 每个UUID对应一个播放线程
@@ -43,14 +53,14 @@ class AudioForkSession:
         
     def connect(self):
         """连接到FreeSWITCH ESL"""
-        print(f"Connecting to FreeSWITCH at {self.host}:{self.port}")
+        self.logger.info(f"Connecting to FreeSWITCH at {self.host}:{self.port}")
         self.con = ESLconnection(self.host, str(self.port), self.password)
         
         if not self.con.connected():
-            print(f"Failed to connect to FreeSWITCH: {self.con.getInfo()}")
+            self.logger.error(f"Failed to connect to FreeSWITCH: {self.con.getInfo()}")
             return False
             
-        print("Connected to FreeSWITCH")
+        self.logger.info("Connected to FreeSWITCH")
         return True
         
     def subscribe_events(self):
@@ -77,7 +87,7 @@ class AudioForkSession:
                     'current_file': None,
                     'last_play_time': None
                 }
-                print(f"Created audio queue for session: {uuid}")
+                self.logger.info(f"Created audio queue for session: {uuid}")
     
     def start_playback_thread(self, uuid: str):
         """启动音频播放处理线程"""
@@ -89,7 +99,7 @@ class AudioForkSession:
                 thread = threading.Thread(target=self.audio_playback_worker, args=(uuid,), daemon=True)
                 thread.start()
                 self.playback_threads[uuid] = thread
-                print(f"Started audio playback thread for session: {uuid}")
+                self.logger.info(f"Started audio playback thread for session: {uuid}")
             
     def stop_playback_thread(self, uuid: str = None):
         """停止音频播放处理线程"""
@@ -121,14 +131,14 @@ class AudioForkSession:
                     if uuid in self.playback_status:
                         self.playback_status[uuid]['playing'] = False
                     
-                    print(f"Stopped audio queue for session: {uuid}")
+                    self.logger.info(f"Stopped audio queue for session: {uuid}")
                     
         except Exception as e:
-            print(f"Error stopping audio queue for {uuid}: {e}")
+            self.logger.error(f"Error stopping audio queue for {uuid}: {e}")
             
     def audio_playback_worker(self, uuid: str):
         """音频播放工作线程 - 参考freeswitch_audio_monitor.py的实现"""
-        print(f"Audio playback worker thread started for session: {uuid}")
+        self.logger.info(f"Audio playback worker thread started for session: {uuid}")
         try:
             while True:
                 try:
@@ -137,11 +147,11 @@ class AudioForkSession:
                     
                     # 检查是否为停止信号
                     if audio_item is None:
-                        print(f"Received stop signal for {uuid}, stopping playback thread")
+                        self.logger.info(f"Received stop signal for {uuid}, stopping playback thread")
                         self.audio_queues[uuid].task_done()  # 标记停止信号任务完成
                         break  # 退出循环
                     
-                    print(f"Audio item: {audio_item}")
+                    self.logger.debug(f"Audio item: {audio_item}")
                     
                     try:
                         # 更新播放状态
@@ -151,10 +161,12 @@ class AudioForkSession:
                             self.playback_status[uuid]['queue_size'] = self.audio_queues[uuid].qsize()
                         
                         # 执行音频播放
-                        self.execute_audio_playback(uuid, audio_item['file'])
+                        self.play_wav_audio(audio_item['file'], uuid)
+                        # 等待播放完成 - 这是关键，确保顺序播放
+                        self.wait_for_playback_completion(audio_item['file'])
                         
                     except Exception as e:
-                        print(f"Error executing audio playback for {uuid}: {e}")
+                        self.logger.error(f"Error executing audio playback for {uuid}: {e}")
                     finally:
                         # 无论播放成功与否，都要标记任务完成
                         self.audio_queues[uuid].task_done()
@@ -163,80 +175,48 @@ class AudioForkSession:
                     # 队列空了，继续等待
                     continue
                 except Exception as e:
-                    print(f"Error in audio playback worker for {uuid}: {e}")
+                    self.logger.error(f"Error in audio playback worker for {uuid}: {e}")
                     continue
         finally:
             # 清理播放状态
             with self.queue_lock:
                 self.playback_status[uuid]['playing'] = False
                 self.playback_status[uuid]['current_file'] = None
-            print(f"Audio playback worker thread stopped for session: {uuid}")
+            self.logger.info(f"Audio playback worker thread stopped for session: {uuid}")
         
-    def execute_audio_playback(self, uuid: str, file_path: str):
-        """执行音频播放 - 参考freeswitch_audio_monitor.py的实现"""
+    def wait_for_playback_completion(self, file_path: str):
+        """等待音频播放完成"""
         try:
-            print(f"Playing audio file: {file_path} for UUID: {uuid}")
-            
-            self.play_wav_audio(file_path, uuid)
-            # 等待播放完成 - 这是关键，确保顺序播放
-            # self.wait_for_playback_completion(uuid, file_path)
-
-            # 首先尝试使用 uuid_broadcast
-            # play_command = f"uuid_broadcast {uuid} {file_path}"
-            # try:
-            #     response = self.con.api(play_command)
-            #     print(f"Broadcast command executed: {response.getBody() if response else 'No response'}")
-            # except Exception as e:
-            #     print(f"Error executing broadcast command: {e}")
-            #     # 尝试使用 uuid_displace 作为备选
-            #     try:
-            #         alt_command = f"uuid_displace {uuid} start {file_path} 0 mux"
-            #         response = self.con.api(alt_command)
-            #         print(f"Alternative displace command executed: {response.getBody() if response else 'No response'}")
-                    
-            #         # 等待播放完成
-            #         self.wait_for_playback_completion(uuid, file_path)
-                    
-            #         # 停止displace
-            #         stop_command = f"uuid_displace {uuid} stop {file_path}"
-            #         self.con.api(stop_command)
-                    
-            #     except Exception as alt_e:
-            #         print(f"Alternative playback also failed: {alt_e}")
-                    
-        except Exception as e:
-            print(f"Error in execute_audio_playback for {uuid}: {e}")
-    
-    def wait_for_playback_completion(self, uuid: str, file_path: str):
-        """等待音频播放完成 - 参考freeswitch_audio_monitor.py的实现"""
-        try:
-            # 默认播放时长
+            # 从配置获取默认播放时长
             wait_time = 2.0
            
-            # 简单的启发式方法：根据文件大小估算
             if os.path.exists(file_path):
                 try:
-                    # 使用文件大小估算播放时长
+                    # 尝试使用librosa获取准确的音频时长
+                    duration = librosa.get_duration(filename=file_path)
+                    wait_time = max(duration, 0.5)  # 最小0.5秒
+                    self.logger.debug(f"Audio duration from librosa: {duration:.2f}s")
+                except ImportError:
+                    # 如果没有librosa，使用文件大小估算
                     file_size = os.path.getsize(file_path)
-                    # 假设 24kHz, mono, 16bit (2字节)
-                    estimated_duration = file_size / (24000 * 1 * 2)
+                    estimated_duration = file_size / (24000 * 1 * 2)  # 24kHz, mono, 16bit
                     wait_time = max(estimated_duration, 0.5)  # 最小0.5秒
-                    print(f"Estimated duration from file size: {estimated_duration:.2f}s")
+                    self.logger.debug(f"Estimated duration from file size: {estimated_duration:.2f}s")
                 except Exception as e:
-                    print(f"Failed to get audio duration, using default: {e}")
+                    self.logger.warning(f"Failed to get audio duration, using default: {e}")
             
             # 限制最大等待时间
             wait_time = min(wait_time, 15.0)
             
-            print(f"Waiting {wait_time:.2f} seconds for audio playback completion: {os.path.basename(file_path)}")
+            self.logger.info(f"Waiting {wait_time:.2f} seconds for audio playback completion: {os.path.basename(file_path)}")
             time.sleep(wait_time)
             
         except Exception as e:
-            print(f"Error waiting for playback completion: {e}")
+            self.logger.error(f"Error waiting for playback completion: {e}")
             
     def play_raw_audio(self, audio_file, sample_rate):
         """播放原始音频文件"""
-        print(f"Playing raw audio file: {audio_file} (sample rate: {sample_rate})")
+        self.logger.info(f"Playing raw audio file: {audio_file} (sample rate: {sample_rate})")
         
         # 尝试多种播放方法
         methods = [
@@ -256,67 +236,67 @@ class AudioForkSession:
         
         for i, method in enumerate(methods, 1):
             try:
-                print(f"Trying playback method {i}...")
+                self.logger.info(f"Trying playback method {i}...")
                 result = method()
                 
                 if result:
                     result_body = result.getBody() if hasattr(result, 'getBody') else str(result)
-                    print(f"Method {i} succeeded: {result_body}")
+                    self.logger.info(f"Method {i} succeeded: {result_body}")
                     return
                 else:
-                    print(f"Method {i} returned None")
+                    self.logger.warning(f"Method {i} returned None")
                     
             except Exception as e:
-                print(f"Method {i} failed: {e}")
+                self.logger.error(f"Method {i} failed: {e}")
                 
-        print("All playback methods failed for raw audio")
+        self.logger.error("All playback methods failed for raw audio")
         
     def play_wav_audio(self, audio_file,uuid):
         """播放WAV音频文件"""
-        print(f"Playing WAV audio file: {audio_file} for UUID: {uuid}")
+        self.logger.info(f"Playing WAV audio file: {audio_file} for UUID: {uuid}")
         
         try:
             result = self.con.execute("playback", audio_file, uuid)
             if result:
-                print(f"WAV playback result: {result.getBody()}")
+                self.logger.info(f"WAV playback result: {result}")
             else:
-                print("WAV playback returned None")
+                self.logger.warning("WAV playback returned None")
                 
         except Exception as e:
-            print(f"Exception during WAV playback: {e}")
+            self.logger.error(f"Exception during WAV playback: {e}")
         
     def on_connect(self, event):
         """连接成功事件处理"""
-        print("successfully connected")
+        self.logger.info("successfully connected")
         
     def on_connect_failed(self, event):
         """连接失败事件处理"""
-        print("connection failed")
+        self.logger.error("connection failed")
         
     def on_disconnect(self, event):
         """断开连接事件处理"""
-        print("far end dropped connection")
+        self.logger.info("far end dropped connection")
         
     def on_error(self, event):
         """错误事件处理"""
-        print(f"got error: {event.getBody()}")
+        self.logger.error(f"got error: {event.getBody()}")
         
     def on_maintenance(self, event):
         """维护事件处理"""
-        print(f"got event: {event.getBody()}")
+        self.logger.info(f"got event: {event.getBody()}")
         
     def handle_play_audio(self, event):
         """处理播放音频事件 - 参考freeswitch_audio_monitor.py的实现"""
         try:
             event_body = event.getBody()
             if not event_body:
-                print("No event body in play_audio event")
+                self.logger.warning("No event body in play_audio event")
                 return
                 
             # 从事件中获取UUID
             event_uuid = event.getHeader("Unique-ID")
             if not event_uuid:
-                print("No UUID found in play_audio event")
+                self.logger.error("No UUID found in play_audio event")
                 return
                 
             data = json.loads(event_body)
@@ -325,11 +305,11 @@ class AudioForkSession:
             text_content = data.get('textContent')
             audio_file = data.get('file')
             
-            print(f"Received play_audio event for UUID {event_uuid}:")
-            print(f"  Audio content type: {audio_content_type}")
-            print(f"  Sample rate: {sample_rate}")
-            print(f"  Text content: {text_content}")
-            print(f"  Audio file: {audio_file}")
+            self.logger.info(f"Received play_audio event for UUID {event_uuid}:")
+            self.logger.debug(f"  Audio content type: {audio_content_type}")
+            self.logger.debug(f"  Sample rate: {sample_rate}")
+            self.logger.debug(f"  Text content: {text_content}")
+            self.logger.debug(f"  Audio file: {audio_file}")
             
             if audio_file and event_uuid:
                 # 确保为当前会话创建音频队列
@@ -351,7 +331,7 @@ class AudioForkSession:
                     # 检查队列大小限制
                     max_queue_size = 100  # 默认最大队列大小
                     if self.audio_queues[event_uuid].qsize() >= max_queue_size:
-                        print(f"Audio queue for {event_uuid} is full (size: {self.audio_queues[event_uuid].qsize()}), dropping oldest item")
+                        self.logger.warning(f"Audio queue for {event_uuid} is full (size: {self.audio_queues[event_uuid].qsize()}), dropping oldest item")
                         try:
                             # 移除最旧的项目
                             self.audio_queues[event_uuid].get_nowait()
@@ -361,25 +341,25 @@ class AudioForkSession:
                     self.audio_queues[event_uuid].put(audio_item)
                     self.playback_status[event_uuid]['queue_size'] = self.audio_queues[event_uuid].qsize()
                 
-                print(f"Added audio to queue for {event_uuid}: {audio_file} (queue size: {self.playback_status[event_uuid]['queue_size']})")
+                self.logger.info(f"Added audio to queue for {event_uuid}: {audio_file} (queue size: {self.playback_status[event_uuid]['queue_size']})")
                 
                 # 如果当前没有在播放，启动播放线程
                 if not self.playback_status[event_uuid]['playing']:
-                    print(f"Starting playback thread for {event_uuid}")
+                    self.logger.info(f"Starting playback thread for {event_uuid}")
                     self.start_playback_thread(event_uuid)
                     
             else:
-                print("Missing audio file path or UUID")
+                self.logger.error("Missing audio file path or UUID")
                 
         except json.JSONDecodeError as e:
-            print(f"Failed to parse play_audio event JSON: {e}")
+            self.logger.error(f"Failed to parse play_audio event JSON: {e}")
         except Exception as e:
-            print(f"Error handling play_audio event: {e}")
+            self.logger.error(f"Error handling play_audio event: {e}")
             
     def handle_kill_audio(self, event):
         """处理停止音频事件 - 参考freeswitch_audio_monitor.py的实现"""
         try:
-            print("Received kill_audio event, stopping audio playback")
+            self.logger.info("Received kill_audio event, stopping audio playback")
             
             # 从事件中获取UUID
             event_uuid = event.getHeader("Unique-ID")
@@ -391,13 +371,14 @@ class AudioForkSession:
                 for uuid in list(self.audio_queues.keys()):
                     self.stop_audio_queue(uuid)
             
-            print("Audio playback stopped successfully")
+            self.logger.info("Audio playback stopped successfully")
             
         except Exception as e:
-            print(f"Error handling kill_audio event: {e}")
+            self.logger.error(f"Error handling kill_audio event: {e}")
         
     def handle_dtmf(self, event):
         """处理DTMF事件"""
+        self.logger.info(f"Received DTMF event: {event.getBody()}")
         dtmf = event.getHeader("DTMF-Digit")
         if dtmf and self.uuid:
             cmd = f"uuid_audio_fork {self.uuid} send_text {dtmf}"
@@ -410,12 +391,60 @@ class AudioForkSession:
         to_uri = event.getHeader("variable_sip_to_uri")
         from_uri = event.getHeader("variable_sip_from_uri")
         
-        print(f"Channel answered: {self.uuid}")
+        self.logger.info(f"Channel answered: {self.uuid}")
         
         # 为当前会话创建音频队列
         self.create_audio_queue_for_session(self.uuid)
         
         self.init_audio_fork(call_id, to_uri, from_uri)
+
+    def cleanup_session(self, uuid: str):
+        """清理会话资源"""
+        with self.queue_lock:
+            if uuid in self.audio_queues:
+                del self.audio_queues[uuid]
+            if uuid in self.playback_threads:
+                del self.playback_threads[uuid]
+            if uuid in self.playback_status:
+                del self.playback_status[uuid]
+
+    def handle_hangup(self, event):
+        """处理挂断事件"""
+        self.logger.info(f"Received hangup event: {event.getBody()}")
+        
+        # 获取UUID并清理相关资源
+        event_uuid = event.getHeader("Unique-ID")
+        if event_uuid:
+            self.stop_audio_queue(event_uuid)
+            self.cleanup_session(event_uuid)
+            self.logger.info(f"Cleaned up resources for UUID {event_uuid}")
+        else:
+            self.logger.warning("No UUID found in hangup event, stopping all audio")
+            # 停止所有音频
+            with self.queue_lock:
+                for uuid in list(self.audio_queues.keys()):
+                    self.stop_audio_queue(uuid)
+                    self.cleanup_session(uuid)
+            self.logger.info("All audio stopped and resources cleaned up")
+            
+    def handle_hangup_complete(self, event):
+        """处理挂断完成事件"""
+        self.logger.info(f"Received hangup complete event: {event.getBody()}")
+        
+        # 获取UUID并清理相关资源
+        event_uuid = event.getHeader("Unique-ID")
+        if event_uuid:
+            self.stop_audio_queue(event_uuid)
+            self.cleanup_session(event_uuid)
+            self.logger.info(f"Cleaned up resources for UUID {event_uuid}")
+        else:
+            self.logger.warning("No UUID found in hangup complete event, stopping all audio")
+            # 停止所有音频
+            with self.queue_lock:
+                for uuid in list(self.audio_queues.keys()):
+                    self.stop_audio_queue(uuid)
+                    self.cleanup_session(uuid)
+            self.logger.info("All audio stopped and resources cleaned up")
         
     def init_audio_fork(self, call_id, to_uri, from_uri):
         """初始化音频流转发"""
@@ -439,7 +468,7 @@ class AudioForkSession:
         
         result = self.con.api(cmd)
         if not result or result.getBody().strip() != "+OK Success":
-            print(f"Failed to start audio fork: {result.getBody() if result else 'No response'}")
+            self.logger.error(f"Failed to start audio fork: {result.getBody() if result else 'No response'}")
             return False
             
         return True
@@ -468,10 +497,14 @@ class AudioForkSession:
             self.handle_dtmf(event)
         elif event_name == "CHANNEL_ANSWER":
             self.handle_channel_answer(event)
+        elif event_name == "CHANNEL_HANGUP":
+            self.handle_hangup(event)
+        elif event_name == "CHANNEL_HANGUP_COMPLETE":
+            self.handle_hangup_complete(event)
             
     def run(self):
         """主事件循环"""
-        print(f"Audio will be streamed to: {self.ws_url}")
+        self.logger.info(f"Audio will be streamed to: {self.ws_url}")
         
         if not self.connect():
             return
@@ -486,17 +519,17 @@ class AudioForkSession:
                 else:
                     # 检查连接状态
                     if not self.con.connected():
-                        print("Disconnected from FreeSWITCH")
+                        self.logger.warning("Disconnected from FreeSWITCH")
                         break
         except KeyboardInterrupt:
-            print("\nShutting down...")
+            self.logger.info("Shutting down...")
         finally:
             # 停止所有播放线程
             self.stop_playback_thread()
             
             if self.con and self.con.connected():
                 self.con.disconnect()
-                print("Disconnected from FreeSWITCH")
+                self.logger.info("Disconnected from FreeSWITCH")
 
 def main():
     parser = argparse.ArgumentParser(description='Audio Fork - Stream audio to WebSocket server')
@@ -508,16 +541,18 @@ def main():
     args = parser.parse_args()
     
     if not args.ws_url:
-        print("Error: must specify WebSocket server URL")
+        logger = logging.getLogger('AudioFork')
+        logger.error("Error: must specify WebSocket server URL")
         sys.exit(1)
         
     # 检查ESL模块
     try:
         from ESL import ESLconnection
     except ImportError:
-        print("Error: ESL module not found. Please install python3-esl package")
-        print("On Debian/Ubuntu: apt-get install python3-esl")
-        print("Or build from FreeSWITCH source: make mod_event_socket-install-python3")
+        logger = logging.getLogger('AudioFork')
+        logger.error("Error: ESL module not found. Please install python3-esl package")
+        logger.error("On Debian/Ubuntu: apt-get install python3-esl")
+        logger.error("Or build from FreeSWITCH source: make mod_event_socket-install-python3")
         sys.exit(1)
         
     app = AudioForkSession(args.ws_url, args.host, args.port, args.password)
