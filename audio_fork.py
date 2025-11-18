@@ -161,9 +161,10 @@ class AudioForkSession:
                             self.playback_status[uuid]['queue_size'] = self.audio_queues[uuid].qsize()
                         
                         # 执行音频播放
-                        self.play_wav_audio(audio_item['file'], uuid)
+                        if audio_item['audioContentType'] == 'wav' or audio_item['audioContentType'] == 'wave':
+                            self.play_wav_audio(audio_item['file'], uuid)
                         # 等待播放完成 - 这是关键，确保顺序播放
-                        self.wait_for_playback_completion(audio_item['file'])
+                        # self.wait_for_playback_completion(audio_item['file'])
                         
                     except Exception as e:
                         self.logger.error(f"Error executing audio playback for {uuid}: {e}")
