@@ -177,32 +177,32 @@ class AudioForkSession:
         try:
             print(f"Playing audio file: {file_path} for UUID: {uuid}")
             
+            self.play_wav_audio(file_path, uuid)
+            # 等待播放完成 - 这是关键，确保顺序播放
+            # self.wait_for_playback_completion(uuid, file_path)
+
             # 首先尝试使用 uuid_broadcast
-            play_command = f"uuid_broadcast {uuid} {file_path}"
-            try:
-                response = self.con.api(play_command)
-                print(f"Broadcast command executed: {response.getBody() if response else 'No response'}")
-                
-                # 等待播放完成 - 这是关键，确保顺序播放
-                self.wait_for_playback_completion(uuid, file_path)
-                
-            except Exception as e:
-                print(f"Error executing broadcast command: {e}")
-                # 尝试使用 uuid_displace 作为备选
-                try:
-                    alt_command = f"uuid_displace {uuid} start {file_path} 0 mux"
-                    response = self.con.api(alt_command)
-                    print(f"Alternative displace command executed: {response.getBody() if response else 'No response'}")
+            # play_command = f"uuid_broadcast {uuid} {file_path}"
+            # try:
+            #     response = self.con.api(play_command)
+            #     print(f"Broadcast command executed: {response.getBody() if response else 'No response'}")
+            # except Exception as e:
+            #     print(f"Error executing broadcast command: {e}")
+            #     # 尝试使用 uuid_displace 作为备选
+            #     try:
+            #         alt_command = f"uuid_displace {uuid} start {file_path} 0 mux"
+            #         response = self.con.api(alt_command)
+            #         print(f"Alternative displace command executed: {response.getBody() if response else 'No response'}")
                     
-                    # 等待播放完成
-                    self.wait_for_playback_completion(uuid, file_path)
+            #         # 等待播放完成
+            #         self.wait_for_playback_completion(uuid, file_path)
                     
-                    # 停止displace
-                    stop_command = f"uuid_displace {uuid} stop {file_path}"
-                    self.con.api(stop_command)
+            #         # 停止displace
+            #         stop_command = f"uuid_displace {uuid} stop {file_path}"
+            #         self.con.api(stop_command)
                     
-                except Exception as alt_e:
-                    print(f"Alternative playback also failed: {alt_e}")
+            #     except Exception as alt_e:
+            #         print(f"Alternative playback also failed: {alt_e}")
                     
         except Exception as e:
             print(f"Error in execute_audio_playback for {uuid}: {e}")
@@ -271,12 +271,12 @@ class AudioForkSession:
                 
         print("All playback methods failed for raw audio")
         
-    def play_wav_audio(self, audio_file):
+    def play_wav_audio(self, audio_file,uuid):
         """播放WAV音频文件"""
-        print(f"Playing WAV audio file: {audio_file}")
+        print(f"Playing WAV audio file: {audio_file} for UUID: {uuid}")
         
         try:
-            result = self.con.execute("playback", audio_file, self.uuid)
+            result = self.con.execute("playback", audio_file, uuid)
             if result:
                 print(f"WAV playback result: {result.getBody()}")
             else:
@@ -313,28 +313,34 @@ class AudioForkSession:
                 print("No event body in play_audio event")
                 return
                 
+            # 从事件中获取UUID
+            event_uuid = event.getHeader("Unique-ID")
+            if not event_uuid:
+                print("No UUID found in play_audio event")
+                return
+                
             data = json.loads(event_body)
             audio_content_type = data.get('audioContentType')
             sample_rate = data.get('sampleRate')
             text_content = data.get('textContent')
             audio_file = data.get('file')
             
-            print(f"Received play_audio event:")
+            print(f"Received play_audio event for UUID {event_uuid}:")
             print(f"  Audio content type: {audio_content_type}")
             print(f"  Sample rate: {sample_rate}")
             print(f"  Text content: {text_content}")
             print(f"  Audio file: {audio_file}")
             
-            if audio_file and self.uuid:
+            if audio_file and event_uuid:
                 # 确保为当前会话创建音频队列
-                self.create_audio_queue_for_session(self.uuid)
+                self.create_audio_queue_for_session(event_uuid)
                 
                 # 创建音频播放任务
                 audio_item = {
                     'file': audio_file,
                     'priority': 0,  # 默认优先级
                     'timestamp': datetime.now(),
-                    'uuid': self.uuid,
+                    'uuid': event_uuid,
                     'audioContentType': audio_content_type,
                     'sampleRate': sample_rate,
                     'textContent': text_content
@@ -344,22 +350,23 @@ class AudioForkSession:
                 with self.queue_lock:
                     # 检查队列大小限制
                     max_queue_size = 100  # 默认最大队列大小
-                    if self.audio_queues[self.uuid].qsize() >= max_queue_size:
-                        print(f"Audio queue for {self.uuid} is full (size: {self.audio_queues[self.uuid].qsize()}), dropping oldest item")
+                    if self.audio_queues[event_uuid].qsize() >= max_queue_size:
+                        print(f"Audio queue for {event_uuid} is full (size: {self.audio_queues[event_uuid].qsize()}), dropping oldest item")
                         try:
                             # 移除最旧的项目
-                            self.audio_queues[self.uuid].get_nowait()
+                            self.audio_queues[event_uuid].get_nowait()
                         except queue.Empty:
                             pass
                     
-                    self.audio_queues[self.uuid].put(audio_item)
-                    self.playback_status[self.uuid]['queue_size'] = self.audio_queues[self.uuid].qsize()
+                    self.audio_queues[event_uuid].put(audio_item)
+                    self.playback_status[event_uuid]['queue_size'] = self.audio_queues[event_uuid].qsize()
                 
-                print(f"Added audio to queue for {self.uuid}: {audio_file} (queue size: {self.playback_status[self.uuid]['queue_size']})")
+                print(f"Added audio to queue for {event_uuid}: {audio_file} (queue size: {self.playback_status[event_uuid]['queue_size']})")
                 
                 # 如果当前没有在播放，启动播放线程
-                if not self.playback_status[self.uuid]['playing']:
-                    self.start_playback_thread(self.uuid)
+                if not self.playback_status[event_uuid]['playing']:
+                    print(f"Starting playback thread for {event_uuid}")
+                    self.start_playback_thread(event_uuid)
                     
             else:
                 print("Missing audio file path or UUID")
@@ -374,9 +381,11 @@ class AudioForkSession:
         try:
             print("Received kill_audio event, stopping audio playback")
             
-            if self.uuid:
+            # 从事件中获取UUID
+            event_uuid = event.getHeader("Unique-ID")
+            if event_uuid:
                 # 停止特定会话的音频队列
-                self.stop_audio_queue(self.uuid)
+                self.stop_audio_queue(event_uuid)
             else:
                 # 如果没有指定UUID，停止所有会话的音频队列
                 for uuid in list(self.audio_queues.keys()):
