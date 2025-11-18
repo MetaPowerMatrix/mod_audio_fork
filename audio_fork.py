@@ -215,24 +215,20 @@ class AudioForkSession:
         except Exception as e:
             self.logger.error(f"Error waiting for playback completion: {e}")
             
-    def play_raw_audio(self, audio_file, sample_rate):
+    def play_raw_audio(self, audio_file, sample_rate, uuid):
         """播放原始音频文件"""
         self.logger.info(f"Playing raw audio file: {audio_file} (sample rate: {sample_rate})")
         
         # 尝试多种播放方法
         methods = [
             # 方法1: 使用uuid_broadcast
-            lambda: self.con.api(f"uuid_broadcast {self.uuid} {audio_file}"),
-            
-            # 方法2: 使用playback命令（设置采样率）
-            lambda: self.con.execute("set", f"playback_sample_rate={sample_rate}", self.uuid) and 
-                   self.con.execute("playback", audio_file, self.uuid),
-                   
+            lambda: self.con.api(f"uuid_broadcast {uuid} {audio_file}"),
+                               
             # 方法3: 使用uuid_displace
-            lambda: self.con.api(f"uuid_displace {self.uuid} start {audio_file}"),
+            lambda: self.con.api(f"uuid_displace {uuid} start {audio_file}"),
             
             # 方法4: 简单的playback
-            lambda: self.con.execute("playback", audio_file, self.uuid)
+            lambda: self.con.execute("playback", audio_file, uuid)
         ]
         
         for i, method in enumerate(methods, 1):
@@ -252,14 +248,15 @@ class AudioForkSession:
                 
         self.logger.error("All playback methods failed for raw audio")
         
-    def play_wav_audio(self, audio_file,uuid):
+    def play_wav_audio(self, audio_file, uuid):
         """播放WAV音频文件"""
         self.logger.info(f"Playing WAV audio file: {audio_file} for UUID: {uuid}")
         
         try:
             result = self.con.execute("playback", audio_file, uuid)
             if result:
-                self.logger.info(f"WAV playback result: {result}")
+                result_body = result.getBody() if hasattr(result, 'getBody') else str(result)
+                self.logger.info(f"playback succeeded: {result_body}")
             else:
                 self.logger.warning("WAV playback returned None")
                 
