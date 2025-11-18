@@ -343,7 +343,7 @@ class AudioForkSession:
                 # 将任务加入播放队列
                 with self.queue_lock:
                     # 检查队列大小限制
-                    max_queue_size = 10  # 默认最大队列大小
+                    max_queue_size = 100  # 默认最大队列大小
                     if self.audio_queues[self.uuid].qsize() >= max_queue_size:
                         print(f"Audio queue for {self.uuid} is full (size: {self.audio_queues[self.uuid].qsize()}), dropping oldest item")
                         try:
