@@ -185,8 +185,8 @@ class AudioForkSession:
                         
                         # 等待播放完成 - 这是关键，确保顺序播放
                         # 使用较短的等待时间避免卡顿
-                        # self.wait_for_playback_completion(audio_item['file'])
-                        time.sleep(0.1)  # 短暂等待，让FreeSWITCH处理播放
+                        yield self.wait_for_playback_completion(audio_item['file'])
+                        # time.sleep(0.1)  # 短暂等待，让FreeSWITCH处理播放
                         
                     except Exception as e:
                         self.logger.error(f"Error executing audio playback for {uuid}: {e}")
